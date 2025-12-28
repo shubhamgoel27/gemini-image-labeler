@@ -2,8 +2,7 @@
 
 A modern, sleek, and efficient Python GUI tool for manually labeling images. Built with `customtkinter` for a polished look and optimized for speed and usability.
 
-![GUI Screenshot](https://via.placeholder.com/1000x700?text=Insert+Screenshot+Here)
-*(Place your screenshot here)*
+![GUI Screenshot](image_labeler.png)
 
 ## Features
 
