@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.venv/
+env/
+venv/
+*.egg-info/
+dist/
+build/
+images/
+labels.csv
+image_labels.csv
+config.json
+.idea/
+.vscode/
