@@ -48,6 +48,8 @@ class ImageLabelerApp(ctk.CTk):
         self.categories = list(DEFAULT_CATEGORIES)
         self.csv_file = "image_labels.csv"
         self.hide_labeled_var = tk.BooleanVar(value=True)
+        self.history = [] # Stack for undo: list of (image_path, label)
+        self.current_rotation = 0
 
         # Load Configuration
         self.load_config()
@@ -124,12 +126,30 @@ class ImageLabelerApp(ctk.CTk):
         # Header
         self.header_frame = ctk.CTkFrame(self.image_area_frame, fg_color="transparent")
         self.header_frame.grid(row=0, column=0, sticky="ew", padx=30, pady=(20, 10))
+        self.header_frame.grid_columnconfigure(1, weight=1)
         
-        self.lbl_filename = ctk.CTkLabel(self.header_frame, text="Welcome", font=ctk.CTkFont(size=20, weight="bold"))
+        self.title_box = ctk.CTkFrame(self.header_frame, fg_color="transparent")
+        self.title_box.grid(row=0, column=0, sticky="w")
+        
+        self.lbl_filename = ctk.CTkLabel(self.title_box, text="Welcome", font=ctk.CTkFont(size=20, weight="bold"))
         self.lbl_filename.pack(anchor="w")
         
-        self.lbl_subinfo = ctk.CTkLabel(self.header_frame, text="Open a folder to start labeling", font=ctk.CTkFont(size=13), text_color="gray60")
+        self.lbl_subinfo = ctk.CTkLabel(self.title_box, text="Open a folder to start labeling", font=ctk.CTkFont(size=13), text_color="gray60")
         self.lbl_subinfo.pack(anchor="w")
+        
+        # Header Tools (Rotate/Trash)
+        self.tools_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
+        self.tools_frame.grid(row=0, column=1, sticky="e")
+
+        self.btn_rotate_l = ctk.CTkButton(self.tools_frame, text="↺", width=40, height=30, command=lambda: self.rotate_image(90))
+        self.btn_rotate_l.pack(side="left", padx=5)
+        
+        self.btn_rotate_r = ctk.CTkButton(self.tools_frame, text="↻", width=40, height=30, command=lambda: self.rotate_image(-90))
+        self.btn_rotate_r.pack(side="left", padx=5)
+        
+        self.btn_trash = ctk.CTkButton(self.tools_frame, text="🗑️", width=40, height=30, fg_color="#cf222e", hover_color="#a01b24",
+                                       command=self.move_to_trash)
+        self.btn_trash.pack(side="left", padx=(15, 0))
 
         # Image Container
         self.image_label = ctk.CTkLabel(self.image_area_frame, text="", corner_radius=0)
@@ -144,6 +164,10 @@ class ImageLabelerApp(ctk.CTk):
         self.btn_prev = ctk.CTkButton(self.nav_frame, text="⬅️ Previous", command=self.prev_image, 
                                       fg_color="transparent", border_width=1, text_color=("gray10", "gray90"), width=120, height=35)
         self.btn_prev.grid(row=0, column=0, sticky="w")
+        
+        self.btn_undo = ctk.CTkButton(self.nav_frame, text="↩ Undo", command=self.undo_last_action,
+                                      fg_color="gray50", hover_color="gray40", width=100, height=35)
+        self.btn_undo.grid(row=0, column=1, padx=20)
         
         self.btn_next = ctk.CTkButton(self.nav_frame, text="Skip / Next ➡️", command=self.next_image, width=120, height=35)
         self.btn_next.grid(row=0, column=2, sticky="e")
@@ -169,6 +193,7 @@ class ImageLabelerApp(ctk.CTk):
         # Keyboard Bindings
         self.bind("<Left>", lambda e: self.prev_image())
         self.bind("<Right>", lambda e: self.next_image())
+        self.bind("<Control-z>", lambda e: self.undo_last_action())
 
         # Startup
         if self.image_folder and os.path.isdir(self.image_folder):
@@ -284,6 +309,7 @@ class ImageLabelerApp(ctk.CTk):
              self.image_files = list(self.all_image_files)
         
         self.current_index = 0
+        self.current_rotation = 0
         self.update_status()
         self.display_current_image()
 
@@ -306,7 +332,12 @@ class ImageLabelerApp(ctk.CTk):
             return
 
         current_file = str(self.image_files[self.current_index])
+        
+        # Save to history for undo
+        self.history.append({'path': current_file, 'label': category, 'index': self.current_index, 'was_hidden': self.hide_labeled_var.get()})
+        
         self.labels[current_file] = category
+        self.current_rotation = 0 # Reset rotation on save
         
         with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
@@ -335,6 +366,97 @@ class ImageLabelerApp(ctk.CTk):
             self.next_image()
             self.update_status()
 
+    def undo_last_action(self):
+        if not self.history:
+            messagebox.showinfo("Undo", "Nothing to undo!")
+            return
+            
+        last_action = self.history.pop()
+        image_path = last_action['path']
+        
+        # 1. Remove from local labels dict
+        if image_path in self.labels:
+            del self.labels[image_path]
+            
+        # 2. Remove from CSV (Rewrite file)
+        self.remove_label_from_csv(image_path)
+        
+        # 3. Restore to view if it was hidden
+        # We need to add it back to self.image_files. 
+        # Ideally we want it at the same position, or we can just append and sort? 
+        # Or simpler: Re-apply filter (which will now see it as unlabeled) and find it.
+        # Re-applying filter is robust but resets index. Let's try to be smart.
+        
+        self.apply_filter() # This puts the image back in self.image_files because we removed it from self.labels
+        
+        # 4. Find the image index to jump to it
+        try:
+            # We want to jump back to the image we just undid
+            path_obj = Path(image_path)
+            # Find index in current image_files
+            for i, f in enumerate(self.image_files):
+                if str(f) == str(path_obj):
+                    self.current_index = i
+                    break
+        except:
+            pass
+            
+        self.display_current_image()
+        self.update_status()
+
+    def remove_label_from_csv(self, image_path_to_remove):
+        if not os.path.exists(self.csv_file):
+            return
+            
+        lines = []
+        with open(self.csv_file, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.reader(f)
+            try:
+                header = next(reader)
+                lines.append(header)
+                for row in reader:
+                    if row and row[0] != str(image_path_to_remove):
+                        lines.append(row)
+            except StopIteration:
+                pass
+                
+        with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerows(lines)
+
+    def move_to_trash(self):
+        if not self.image_files:
+            return
+            
+        current_file = self.image_files[self.current_index]
+        trash_dir = Path(self.image_folder) / "trash"
+        trash_dir.mkdir(exist_ok=True)
+        
+        try:
+            dest = trash_dir / current_file.name
+            shutil.move(current_file, dest)
+            
+            # Remove from all lists
+            if current_file in self.all_image_files:
+                self.all_image_files.remove(current_file)
+            
+            # Remove from current view
+            del self.image_files[self.current_index]
+            
+            # Reset index if out of bounds
+            if self.current_index >= len(self.image_files):
+                self.current_index = max(0, len(self.image_files) - 1)
+                
+            self.display_current_image()
+            self.update_status()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not move to trash: {e}")
+
+    def rotate_image(self, degrees):
+        self.current_rotation = (self.current_rotation + degrees) % 360
+        self.display_current_image()
+
     def display_current_image(self):
         if not self.image_files:
             if self.all_image_files:
@@ -360,7 +482,7 @@ class ImageLabelerApp(ctk.CTk):
                 area_width = self.image_area_frame.winfo_width()
                 area_height = self.image_area_frame.winfo_height()
                 
-                # Subtract padding rough estimate to prevent jitter
+                # Subtract padding rough estimate
                 area_width -= 60
                 area_height -= 40
 
@@ -368,6 +490,11 @@ class ImageLabelerApp(ctk.CTk):
                 if area_height < 100: area_height = 600
 
                 pil_img = Image.open(file_path)
+                
+                # Apply rotation
+                if self.current_rotation != 0:
+                    pil_img = pil_img.rotate(self.current_rotation, expand=True)
+
                 ratio = min(area_width / pil_img.width, area_height / pil_img.height)
                 new_width = int(pil_img.width * ratio)
                 new_height = int(pil_img.height * ratio)
@@ -381,6 +508,7 @@ class ImageLabelerApp(ctk.CTk):
             self.image_label.configure(text="End of list", image=None)
 
     def next_image(self):
+        self.current_rotation = 0 # Reset rotation
         if self.current_index < len(self.image_files) - 1:
             self.current_index += 1
             self.display_current_image()
@@ -388,6 +516,7 @@ class ImageLabelerApp(ctk.CTk):
             messagebox.showinfo("Done", "You have reached the last image.")
 
     def prev_image(self):
+        self.current_rotation = 0 # Reset rotation
         if self.current_index > 0:
             self.current_index -= 1
             self.display_current_image()
@@ -409,6 +538,9 @@ class ImageLabelerApp(ctk.CTk):
             self.cat_buttons.append(btn)
         
         # Custom Entry - Placed in the fixed bottom frame
+        self.custom_frame = ctk.CTkFrame(self.cat_outer_frame, fg_color="transparent")
+        self.custom_frame.grid(row=2, column=0, sticky="ew", padx=15, pady=20)
+        
         self.custom_entry = ctk.CTkEntry(self.custom_frame, placeholder_text="New Category...", height=35)
         self.custom_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
         
